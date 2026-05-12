@@ -1,11 +1,24 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, Suspense } from 'react'
 import { signIn } from 'next-auth/react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 
-export default function LoginPage() {
+const authErrorMessages: Record<string, string> = {
+  OAuthCreateAccount: 'Unable to create account from the social login provider. Please try again or use a different provider.',
+  OAuthAccountNotLinked: 'An account with this email already exists. Please sign in using the provider linked to your account.',
+  EmailCreateAccount: 'Please sign in with credentials before linking an email account.',
+  Callback: 'The login callback failed. Please try again.',
+  OAuthSignin: 'There was an issue signing in with the provider. Please try again.',
+  CredentialsSignin: 'Invalid email or password.',
+  Default: 'Unexpected authentication error. Please try again.',
+}
+
+function LoginForm() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const error = searchParams?.get('error')
+  const errorMessage = error ? authErrorMessages[error] ?? `Authentication error: ${error}` : null
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -55,6 +68,13 @@ export default function LoginPage() {
         <h1 className="text-3xl font-bold mb-6">
           Login
         </h1>
+
+        {errorMessage ? (
+          <div className="mb-6 rounded-xl border border-red-300 bg-red-50 p-4 text-red-800">
+            <p className="font-semibold">Authentication error</p>
+            <p className="mt-1 text-sm">{errorMessage}</p>
+          </div>
+        ) : null}
 
         <input
           type="email"
@@ -115,5 +135,13 @@ export default function LoginPage() {
         </button>
       </form>
     </div>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <LoginForm />
+    </Suspense>
   )
 }
