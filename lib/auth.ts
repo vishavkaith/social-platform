@@ -1,60 +1,10 @@
 import { NextAuthOptions } from 'next-auth'
 import { PrismaAdapter } from '@auth/prisma-adapter'
 import CredentialsProvider from 'next-auth/providers/credentials'
-import FacebookProvider from 'next-auth/providers/facebook'
-import InstagramProvider from 'next-auth/providers/instagram'
-import TwitterProvider from 'next-auth/providers/twitter'
 import bcrypt from 'bcryptjs'
 import { prisma } from './prisma'
-import type { JWT } from 'next-auth/jwt'
-import type { Session } from 'next-auth'
-
-declare module 'next-auth' {
-  interface Session {
-    user?: {
-      id?: string
-      name?: string | null
-      email?: string | null
-      image?: string | null
-      accessToken?: string
-      providers?: {
-        facebook?: {
-          accessToken: string
-          providerAccountId: string
-        }
-        instagram?: {
-          accessToken: string
-          providerAccountId: string
-        }
-        twitter?: {
-          accessToken: string
-          providerAccountId: string
-        }
-      }
-    }
-  }
-}
-
-declare module 'next-auth/jwt' {
-  interface JWT {
-    id?: string | number
-    accessToken?: string
-    providers?: {
-      facebook?: {
-        accessToken: string
-        providerAccountId: string
-      }
-      instagram?: {
-        accessToken: string
-        providerAccountId: string
-      }
-      twitter?: {
-        accessToken: string
-        providerAccountId: string
-      }
-    }
-  }
-}
+import { authProviders } from '@/lib/providers/socialProviders'
+import type { SocialProvider, SocialProvidersMap } from '@/types/social'
 
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma),
@@ -63,7 +13,7 @@ export const authOptions: NextAuthOptions = {
       name: 'credentials',
       credentials: {
         email: { label: 'Email', type: 'email' },
-        password: { label: 'Password', type: 'password' }
+        password: { label: 'Password', type: 'password' },
       },
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) {
@@ -72,19 +22,15 @@ export const authOptions: NextAuthOptions = {
 
         const user = await prisma.user.findFirst({
           where: {
-            email: credentials.email
-          }
+            email: credentials.email,
+          },
         })
 
         if (!user || !user.password) {
           return null
         }
 
-        const isPasswordValid = await bcrypt.compare(
-          credentials.password,
-          user.password
-        )
-
+        const isPasswordValid = await bcrypt.compare(credentials.password, user.password)
         if (!isPasswordValid) {
           return null
         }
@@ -94,45 +40,9 @@ export const authOptions: NextAuthOptions = {
           email: user.email,
           name: user.name,
         }
-      }
-    }),
-    FacebookProvider({
-      clientId: process.env.FACEBOOK_APP_ID ?? '',
-      clientSecret: process.env.FACEBOOK_APP_SECRET ?? '',
-      authorization: {
-        params: {
-          scope: 'email,public_profile,pages_show_list,pages_read_engagement',
-          auth_type: 'rerequest',
-        },
-      },
-      profile(profile) {
-        const userData: any = {
-          id: profile.id,
-          name: profile.name || `${profile.first_name ?? ''} ${profile.last_name ?? ''}`.trim(),
-          image: profile.picture?.data?.url,
-        }
-
-        if (profile.email) {
-          userData.email = profile.email
-        }
-
-        return userData
       },
     }),
-    InstagramProvider({
-      clientId: process.env.INSTAGRAM_CLIENT_ID ?? '',
-      clientSecret: process.env.INSTAGRAM_CLIENT_SECRET ?? '',
-      authorization: {
-        params: {
-          scope: 'user_profile,user_media',
-        },
-      },
-    }),
-    TwitterProvider({
-      clientId: process.env.TWITTER_CLIENT_ID ?? '',
-      clientSecret: process.env.TWITTER_CLIENT_SECRET ?? '',
-      version: '2.0',
-    }),
+    ...authProviders,
   ],
   session: {
     strategy: 'jwt',
@@ -152,156 +62,131 @@ export const authOptions: NextAuthOptions = {
   },
   pages: {
     signIn: '/login',
+    error: '/auth/error',
   },
   callbacks: {
+    /**
+     * SignIn callback - Allows or denies user sign-in.
+     * Returning false triggers AccessDenied error.
+     * For OAuth providers, we allow all sign-ins (PrismaAdapter handles user creation).
+     * For credentials, authorization already filtered invalid users.
+     */
     async signIn({ user, account, profile }) {
-      console.debug('signIn callback', { user, account, profile })
-
-      // For OAuth providers, ensure user exists in database
-      if (account?.provider !== 'credentials' && user?.id && account) {
-        try {
-          // Check if the user already exists by provider account or email.
-          const searchByEmail = user.email ? { email: user.email } : undefined
-
-          let existingUser = await prisma.user.findFirst({
-            where: {
-              OR: [
-                {
-                  accounts: {
-                    some: {
-                      provider: account.provider,
-                      providerAccountId: user.id,
-                    },
-                  },
-                },
-                ...(searchByEmail ? [searchByEmail] : []),
-              ],
-            },
-          })
-
-          if (!existingUser) {
-            existingUser = await prisma.user.create({
-              data: {
-                name: user.name,
-                email: user.email,
-                image: user.image,
-              },
-            })
-          }
-
-          const existingAccount = await prisma.account.findUnique({
-            where: {
-              provider_providerAccountId: {
-                provider: account.provider,
-                providerAccountId: user.id,
-              },
-            },
-          })
-
-          if (!existingAccount) {
-            await prisma.account.create({
-              data: {
-                userId: existingUser.id,
-                type: account.type,
-                provider: account.provider,
-                providerAccountId: user.id,
-                access_token: account.access_token,
-                token_type: account.token_type,
-                scope: account.scope,
-                expires_at: account.expires_at,
-                refresh_token: account.refresh_token,
-              }
-            })
-          }
-
-          // Update user ID for NextAuth
-          user.id = existingUser.id.toString()
-
-        } catch (error) {
-          console.error('Error in signIn callback:', error)
+      try {
+        // Allow all sign-ins - PrismaAdapter handles account creation/linking
+        // User object is already validated by the provider
+        if (!user?.id) {
+          console.warn('[auth] signIn: Missing user.id', { account, profile })
           return false
         }
+        return true
+      } catch (error) {
+        console.error('[auth] signIn error:', error)
+        return false
+      }
+    },
+
+    /**
+     * JWT callback - Stores account/provider info in the JWT token.
+     * This token is then used in the session callback and sent to the client.
+     * Essential for accessing provider access tokens and provider account IDs.
+     */
+    async jwt({ token, account, user, profile }) {
+      try {
+        // Store user ID
+        if (user?.id) {
+          token.id = String(user.id)
+        }
+
+        // When OAuth account is first linked or refreshed, store provider data
+        if (account) {
+          const providerKey = account.provider as SocialProvider
+
+          // Initialize providers object if it doesn't exist
+          if (!token.providers) {
+            token.providers = {}
+          }
+
+          // Store provider-specific tokens and info
+          ;(token.providers as SocialProvidersMap)[providerKey] = {
+            accessToken: account.access_token || '',
+            providerAccountId: account.providerAccountId || undefined,
+          }
+
+          // Also set current provider info
+          token.provider = account.provider
+          token.accessToken = account.access_token || ''
+        }
+
+        return token
+      } catch (error) {
+        console.error('[auth] JWT callback error:', error, { account, user })
+        return token
+      }
+    },
+
+    /**
+     * Session callback - Exposes JWT token data to the client session.
+     * This is what the frontend receives when calling useSession().
+     * Includes user ID, connected providers, and access tokens.
+     */
+    async session({ session, token }) {
+      try {
+        if (!session.user) {
+          return session
+        }
+
+        // Expose JWT token data to session
+        session.user.id = String(token.id || '')
+        session.user.provider = (token.provider as SocialProvider) || undefined
+        session.user.accessToken = (token.accessToken as string) || undefined
+        session.user.providers = (token.providers as SocialProvidersMap) || {}
+
+        return session
+      } catch (error) {
+        console.error('[auth] Session callback error:', error)
+        return session
+      }
+    },
+
+    /**
+     * Redirect callback - Controls where users are redirected after sign-in/sign-out.
+     * Allows relative URLs and same-origin URLs, otherwise redirects to dashboard.
+     */
+    async redirect({ url, baseUrl }) {
+      // Allow relative URLs
+      if (url.startsWith('/')) {
+        return `${baseUrl}${url}`
       }
 
-      return true
-    },
-    async redirect({ url, baseUrl }) {
-      // Allow relative callback URLs
-      if (url.startsWith('/')) return `${baseUrl}${url}`
-      // Allow same-origin callback URLs
-      else if (new URL(url).origin === baseUrl) return url
-      // Default to dashboard
+      // Allow same-origin URLs
+      try {
+        const urlObj = new URL(url)
+        if (urlObj.origin === baseUrl) {
+          return url
+        }
+      } catch {
+        // Invalid URL, fall through to default
+      }
+
+      // Default redirect to dashboard
       return `${baseUrl}/dashboard`
     },
-    async jwt({ token, user, account }) {
-      if (user) {
-        const userId = Number(user.id)
-        token.id = Number.isNaN(userId) ? user.id : userId
-        token.email = user.email
-        token.name = user.name
-      }
-
-      if (account?.access_token && user) {
-        if (!token.providers) {
-          token.providers = {}
-        }
-        const provider = account.provider as keyof typeof token.providers
-        if (provider === 'facebook' || provider === 'instagram' || provider === 'twitter') {
-          token.providers[provider] = {
-            accessToken: account.access_token,
-            providerAccountId: account.providerAccountId || '',
-          }
-        }
-      }
-
-      return token
-    },
-    async session({ session, token }) {
-      if (session.user && token.id) {
-        session.user.id = String(token.id)
-        session.user.email = token.email as string
-        session.user.name = token.name as string
-        
-        // Load all connected accounts from the database
-        try {
-          const userId = typeof token.id === 'string' ? parseInt(token.id, 10) : token.id
-          
-          if (!isNaN(userId)) {
-            const accounts = await prisma.account.findMany({
-              where: { userId },
-            })
-
-            session.user.providers = {}
-
-            for (const account of accounts) {
-              const provider = account.provider as keyof typeof session.user.providers
-              if (provider === 'facebook' || provider === 'instagram' || provider === 'twitter') {
-                if (account.access_token) {
-                  session.user.providers[provider] = {
-                    accessToken: account.access_token,
-                    providerAccountId: account.providerAccountId,
-                  }
-                }
-              }
-            }
-
-            // Keep the first available token for backward compatibility
-            const firstProvider = Object.keys(session.user.providers)[0] as keyof typeof session.user.providers | undefined
-            if (firstProvider && session.user.providers[firstProvider]) {
-              session.user.accessToken = session.user.providers[firstProvider].accessToken
-            }
-          }
-        } catch (error) {
-          console.error('Error loading user accounts:', error)
-        }
-      }
-      return session
-    },
   },
+
+  /**
+   * Events - Hooks that fire at key points in the auth lifecycle.
+   * Currently logging linkAccount events for debugging and future webhook support.
+   */
   events: {
-    async linkAccount({ user, account }) {
-      // This event fires when an OAuth account is linked to a user
-      // It helps with account linking workflows
+    async linkAccount({ user, account, profile }) {
+      // Fires when an OAuth account is linked to an existing user
+      // Useful for logging, analytics, and triggering webhooks
+      console.log('[auth] Account linked:', {
+        userId: user.id,
+        provider: account.provider,
+        providerAccountId: account.providerAccountId,
+      })
     },
   },
 }
